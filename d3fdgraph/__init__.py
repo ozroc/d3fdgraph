@@ -1,1 +1,2 @@
-from .d3fdgraph import plot_force_directed_graph
+from .d3fdgraph import *
+
