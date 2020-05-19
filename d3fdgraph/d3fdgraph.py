@@ -5,6 +5,7 @@ import colorsys
 
 import jinja2
 import networkx
+import community
 import IPython.core.display
 from .d3Templates import d3fdTemplate
 
@@ -27,7 +28,9 @@ class d3fdGraph(d3fdTemplate):
                  link_distance=20, 
                  collision_scale=1.5, 
                  link_width_scale=4,
-                 charge = -20
+                 charge = -20,
+                 gravity = 0.1,
+                 show_label = True
     ):
         self._attrs={
             'imgwidth': imgsize[0],
@@ -36,7 +39,10 @@ class d3fdGraph(d3fdTemplate):
             'link_distance': link_distance,
             'collision_scale': collision_scale,
             'link_width_scale': link_width_scale,
-            'charge': charge
+            'charge': charge,
+            'show_label': show_label,
+            'gravity': gravity,
+            'cluster_strength': 100
         }
         
         self._edges = []
@@ -56,6 +62,17 @@ class d3fdGraph(d3fdTemplate):
         node_dict['radius'] = node_dict.get('radius', 0)
         self._nodes[node_dict['id']] = node_dict
 
+    @property
+    def communities(self):
+        communities={}
+        for i in self.nodes:
+            com= i.get('community', 0)
+            if com not in communities.keys():
+                communities[com] = i
+            if communities[com].get('radius', 0) < i.get('radius', 0):
+                communities[com] = i
+        return communities
+        
     def add_edge(self, edge_dict):
         for nid in ('source', 'target'):
             if nid not in edge_dict.keys():
@@ -68,8 +85,13 @@ class d3fdGraph(d3fdTemplate):
         # TODO: Histograms
         colormap = {}
         categories = set(map(lambda x: x.get(group_key, None), self.nodes))
+        try:
+            categories=sorted(categories)
+        except:
+            pass
         colors = get_N_HexCol(len(categories))
         to_color=dict(zip(categories, colors))
+        self._colormap = to_color
         for n in self.nodes:
             n['color'] = to_color[n.get(group_key, None)]
             
@@ -83,13 +105,13 @@ class d3fdGraph(d3fdTemplate):
             n['color'] = to_color[n.get(group_key, None)]
 
     def set_node_radius_by(self, group_key):
-        radius = list(map(lambda x: x[group_key], self.nodes))
+        radius = list(map(lambda x: x.get(group_key, 0), self.nodes))
         M=max(radius)
         m=min(radius)
         if M-m == 0:
             M+=1
         for n in self.nodes:
-            n['radius'] = self._attrs['node_radius']*(1.5*(n[group_key]-m)/(M-m))
+            n['radius'] = self._attrs['node_radius']*(1.5*(n.get(group_key, 0)-m)/(M-m))
 
     def normalize_weights(self):
         try:
@@ -111,6 +133,13 @@ class d3fdGraph(d3fdTemplate):
         return self._edges
 
     @property
+    def networkx(self):
+        nxg = networkx.Graph()
+        for edge in self.edges:
+            nxg.add_edge(edge['source'], edge['target'], weight=edge.get('weight', 1))
+        return nxg
+    
+    @property
     def node_ids(self):
         return self._nodes.keys()
     
@@ -118,7 +147,7 @@ class d3fdGraph(d3fdTemplate):
     def nodes(self):
         nodelist = list(self._nodes.values())
         for i in nodelist:
-            o='%s' % i.get('label', i['id'])
+            o='%s' % i['id']
             for j in i.keys():
                 if j not in ('hover', 'id', 'label', 'color', 'radius', 'image'):
                     o+='\n %s ->\t %s' % (j, i[j])
@@ -130,6 +159,21 @@ class d3fdGraph(d3fdTemplate):
         self._nodes = []
         graph_json = networkx.readwrite.json_graph.node_link_data(nxgraph)
 
+    def set_communities(self, method='louvain'):
+        parts = community.best_partition(self.networkx)
+        for i in self.node_ids:
+            self._nodes[i]['community']=parts.get(i, -1)
+
+    def set_node_centrality(self, method='degree'):
+        methods={
+            'betweenness': networkx.betweenness_centrality,
+            'degree': networkx.degree_centrality,
+            'closeness': networkx.closeness_centrality
+        }
+        centrality = methods[method](self.networkx)
+        for i in self.node_ids:
+            self._nodes[i]['%s_centrality' % method]=centrality[i]
+        
     def from_dict(self, edgelist, nodelist=None):
         
         self._edges = []
@@ -155,15 +199,10 @@ class d3fdGraph(d3fdTemplate):
     def data(self):
         return {'config': self.attrs,
             'nodes': list(self.nodes),
-            'links': list(self.edges)
+            'links': list(self.edges),
+            'clusters': self.communities    
         }
-    @property
-    def js(self):
-        return self._js.render(**self.data)
     
-    @property
-    def html(self):
-        return self._html.render(**self.data)
 
     def set_unique_id(self, uid):
         if uid is None:
@@ -173,11 +212,28 @@ class d3fdGraph(d3fdTemplate):
     def nbplot(self, uid=None):
         self.set_unique_id(uid)
         # display html in notebook cell
-        IPython.core.display.display_html(IPython.core.display.HTML(self.html))
+        IPython.core.display.display_html(IPython.core.display.HTML(self._html_jupyter.render(**self.data)))
 
         # display (run) javascript in notebook cell
-        IPython.core.display.display_javascript(IPython.core.display.Javascript(data=self.js))
+        IPython.core.display.display_javascript(IPython.core.display.Javascript(data=self._js_jupyter.render(**self.data)))
 
+    def plot_components(self, uid=None):
+        self.set_unique_id(uid)
+        div=self._html.render(**self.data)
+        script=self._js_standalone.render(**self.data)
+        return (div, script)
+
+    @property
+    def html(self):
+        return '''
+            <html>
+            <body>
+            %s
+            %s
+            </body>
+            </html>
+            ''' % self.plot_components()
+        
 def plot_force_directed_graph(node1_node1_weight, node_radius=15, link_distance=20, collision_scale=4, link_width_scale=4, charge=-20):
     g=d3fdGraph( node_radius=node_radius, link_distance=link_distance, collision_scale=collision_scale, link_width_scale=link_width_scale, charge=charge)
     g.from_pandas(node1_node1_weight)
